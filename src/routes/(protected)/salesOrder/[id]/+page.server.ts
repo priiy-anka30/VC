@@ -2,6 +2,7 @@
 import type { PageServerLoad } from './$types';
 import type { SalesOrder } from '$lib/types';
 import { redirect } from '@sveltejs/kit';
+import { db } from '$lib/database';
 
 async function getToken(fetch: typeof globalThis.fetch): Promise<string> {
     const tokenResponse = await fetch('/api/zohoAuthToken');
@@ -35,8 +36,21 @@ export const load: PageServerLoad = async ({ params, fetch, locals }) => {
 
     const data = await response.json();
     const salesOrder: SalesOrder = data.salesorder;
+    // Fetch activity logs from your database
+    const activityLogs = await db.activityLog.findMany({
+        where: { salesOrderId: salesOrder.salesorder_number },
+        orderBy: { timestamp: 'desc' }
+         });
+    
+    // Fetch Stage0 data from your database
+    const currentStage = await db.stage0.findUnique({
+    where: { SONumber: salesOrder.salesorder_number },
+    select: { currentStage: true }
+    });
 
     return {
-        salesOrder
+        salesOrder,
+        activityLogs,
+        currentStage
     };
 };

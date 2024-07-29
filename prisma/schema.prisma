@@ -45,6 +45,7 @@ model Stage0 {
   Total        Float
   SOCategory   String     
   PMName       String
+  clientExpectedDate    DateTime
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
   Stage1       Stage1[]
@@ -52,14 +53,17 @@ model Stage0 {
   Installation Installation[]
   Service      Service[]
   Stage4       Stage4[]
+  activityLogs   ActivityLog[]
 }
 
 model Stage1 {
-  SONumber        String   @id @map("_id")
+  DCid            String    @id @default(auto()) @map("_id") @db.ObjectId
+  SONumber        String   
   DCNumber        String 
-  CourierTrackNo  String
+  Status          String
+  PODNo           String
   DispatchDate    DateTime
-  DeliveryDate    DateTime
+  EstdDeliveryDate    DateTime
   DCAmount        Float
   Attachment      String?
   submittedOn     DateTime   @default(now())
@@ -116,4 +120,16 @@ model Stage4{
   Remark          String?
   Attachment      String?
   SONo            Stage0     @relation(fields: [SONumber], references: [SONumber])
+}
+
+model ActivityLog {
+  id             String   @id @default(auto()) @map("_id") @db.ObjectId
+  salesOrderId   String
+  username       String
+  role           String
+  action         String
+  timestamp      DateTime @default(now())
+  salesOrder     Stage0   @relation(fields: [salesOrderId], references: [SONumber])
+
+  @@index([salesOrderId])
 }

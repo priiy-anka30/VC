@@ -6,24 +6,84 @@
   import type { SalesOrder } from '$lib/types';
   import type { PageData } from '../../routes/$types';
   import { slide } from 'svelte/transition';
+  import { invalidateAll } from '$app/navigation';
   import { logStore, type LogEntry } from '../stores/LogStore';
 
   // Add these properties
   export let username: string;
   export let userRole: string;
 
-  function handleFieldUpdate(fieldName: string, oldValue: string, newValue: string) {
-    const logEntry: LogEntry = {
-      username: username,
-      role: userRole,
-      action: `Updated ${fieldName} from "${oldValue}" to "${newValue}"`,
-      timestamp: new Date()
-    };
-    logStore.addLog(salesOrder.salesorder_number, logEntry);
-    
-    const unsubscribe = logStore.subscribe(logs => logStore.saveLogs(logs));
-    unsubscribe();
+  let showDetailsPopup = false;
+  let selectedDcDetails: DcBox['dcDetails'] | null = null;
+
+    function openDetailsPopup(details: DcBox['dcDetails']) {
+    selectedDcDetails = details;
+    showDetailsPopup = true;
   }
+
+  function closeDetailsPopup() {
+    showDetailsPopup = false;
+    selectedDcDetails = null;
+  }
+
+
+
+interface DcBox {
+  // ... other properties
+  status?: 'Valid' | 'Invalid' | 'Error' | 'Not Found';
+  dcDetails?: {
+    dcNumber: string;
+    customerName: string;
+    companyName: string;
+    dcDate: string;
+    total: number;
+    status: string;
+    challanStatus: string;
+    referenceNumber: string;
+    branchName: string;
+  };
+}
+
+
+async function validateAndShowDetails(dcNumber: string, index: number) {
+  if (!dcNumber) {
+    alert("Please enter a DC number");
+    return;
+  }
+
+  try {
+    const response = await fetch(`/api/validate-dc?dc_number=${encodeURIComponent(dcNumber)}`);
+    const data = await response.json();
+    console.log(data);
+
+    if (data.error) {
+      dcBoxes[index].status = 'Invalid';
+      alert(data.error);
+    } else if (data.deliverychallans && data.deliverychallans.length > 0) {
+      const dc = data.deliverychallans[0];
+      dcBoxes[index].status = 'Valid';
+      dcBoxes[index].dcDetails = {
+        dcNumber: dc.deliverychallan_number,
+        customerName: dc.customer_name,
+        companyName: dc.company_name,
+        dcDate: dc.date,
+        total: dc.total,
+        status: dc.status,
+        challanStatus: dc.challan_status,
+        referenceNumber: dc.reference_number,
+        branchName: dc.branch_name
+      };
+    } else {
+      dcBoxes[index].status = 'Not Found';
+    }
+  } catch (error) {
+    console.error('Error validating DC:', error);
+    dcBoxes[index].status = 'Error';
+    alert('An error occurred while validating the DC number');
+  }
+
+  dcBoxes = [...dcBoxes]; // Trigger reactivity
+}
 
   let showAddMore = false;
 
@@ -39,30 +99,39 @@
 
   // Interfaces
   interface LineItem {
-
+    id: string;
     SONumber: string;
     isAvailabilityFrozen: any;
-	isAvailable: boolean;
+    needToPurchaseLocally: boolean;
+	  isAvailable: boolean;
     name: string;
     quantity: number;
     unit: string;
     rate: number;
     item_total: number;
     status: string;
+    serialNo?: string;
+    invoiceNo?: string;
+    attachment?: string;
   }
 
   interface DCBox {
-  
-    SONumber: string;
-    customName: string;
+  dcDetails: { dcNumber: any; customerName: any; companyName: any; dcDate: any; total: any; status: any; challanStatus: any; referenceNumber: any; branchName: any; };
+  status: any;
+  SONumber: string;
+  customName: string;
   trackingNo: string;
   dispatchedDate: string;
   deliveryDate: string;
   dcAmount: number;
-  attachment: File | null;
+  attachment: String;
   lineItemCount: number;
   isSaved: boolean;
   lineItemIndices: number[];
+  fileName: string;
+  filePreviewUrl: string | null;
+  billType: 'DC' | 'E-way';
+  isTypeSet: boolean;
 }
 
   // Stage and form variables
@@ -76,13 +145,16 @@
   { title: 'Stage 5. Share with Account', completed: false, visible: true }
 ];
 
-    let Stage0Data = {
+  export let Stage0Data: any;
+
+    Stage0Data = {
     SONumber: salesOrder.salesorder_number,
     clientName: salesOrder.customer_name,
     SubTotal: salesOrder.sub_total,
     Total: salesOrder.total,
-    SOCategory : '',
-    projectManagerName : ''
+    SOCategory : salesOrder.custom_field_hash.cf_so_cat,
+    projectManagerName : salesOrder.custom_field_hash.cf_project_manager_name,
+    clientExpectedDate : ''
   };
   let Stage3Data={
     SONumber: salesOrder.salesorder_number,
@@ -108,49 +180,59 @@
     Attachment:''
   }
 
-  let soCategory = '';
-  let projectManagerName = [];
-
   let isEditing = true;
   let partialDelivery = false;
   let canAccessNextStage = false;
-  let newlyAvailableItems: any[] = [];
-  let notAvailableItems: LineItem[] = [];
+  let allItemsSaved = false;
+  let newlyAvailableItems: Array<{ id: string, name: string, status: 'available' | 'need_to_purchase' }> = [];  let notAvailableItems: LineItem[] = [];
    // Map line items with status
   let lineItemsWithStatus: LineItem[] = salesOrder.line_items.map(item => ({
     ...item,
+    id: `${item.name}_${item.quantity}`,
     status: '',
     isAvailable: false,
     isAvailabilityFrozen: false,
-    SONumber: salesOrder.salesorder_number
+    SONumber: salesOrder.salesorder_number,
+    needToPurchaseLocally: false
   }));
+  let minDate: string;
+
+function updateMinDate() {
+  minDate = new Date().toISOString().split('T')[0];
+}
+
+onMount(() => {
+  updateMinDate();
+  const interval = setInterval(updateMinDate, 60000); // Update every minute
+  return () => clearInterval(interval);
+});
+  
 
   let dcOrderTotal = { subtotal: 0, igst: 0, total: 0 };
-  let frozenLineItems: { [key: number]: boolean } = {};
-  // Initialize dcBoxes array
+  let frozenLineItems: { [key: string]: boolean } = {};
   let dcBoxes: DCBox[] = [{
-    customName: '',
-    trackingNo: '', 
-    dispatchedDate: '', 
-    deliveryDate: '', 
-    dcAmount: 0, 
-    attachment: null, 
-    lineItemCount: 0, 
-    isSaved: false,
-	  lineItemIndices: [],
-    SONumber: salesOrder.salesorder_number
-  }];
+        dcDetails: { dcNumber: '', customerName: '', companyName: '', dcDate: '', total: '', status: '', challanStatus: '', referenceNumber: '', branchName: '' },
+        SONumber: salesOrder.salesorder_number,
+        customName: '',
+        status: '',
+        trackingNo: '',
+        dispatchedDate: '',
+        deliveryDate: '',
+        dcAmount: 0,
+        attachment: '',
+        lineItemCount: 0,
+        isSaved: false,
+        lineItemIndices: [],
+        fileName: '',
+        filePreviewUrl: null,
+        billType: 'DC', // Default to DC
+        isTypeSet: false, 
+    }];
   let dcCounter = 1;
 
   // Reactive declarations
   $: allStatusesFilled = lineItemsWithStatus.every(item => item.status !== '');
   $: partialDelivery = lineItemsWithStatus.some(item => item.status === 'not_available');
-    projectManagerName = [
-      'PRIYA',
-      'SHUBHAM22',
-      'RASHMI'
-  ]
-  
 
   // Lifecycle hooks
   onMount(() => {
@@ -185,9 +267,17 @@ function goToPreviousStage() {
   // Form submission and validation
   function handleSubmit(event: Event) {
     event.preventDefault();
+    if (currentStage === 2) {
+    if (allItemsSaved) {
+      showConfirmationPopup = true;
+    } else {
+      alert("Please save all items before submitting the stage.");
+    }
+  } 
+
     if (currentStage === (stageData[4].visible ? 5 : 4)) {
       // Share with Account stage
-      const allItemsHaveStatus = [...shipments, ...returnPickups]
+      const allItemsHaveStatus = [...shipments, returnPickup]
         .filter(item => item.isSaved)
         .every(item => item.accountStatus && item.accountRemark.trim());
       
@@ -198,6 +288,16 @@ function goToPreviousStage() {
       }
     } else {
       showConfirmationPopup = true;
+    }
+  
+    if (currentStage === 1){
+      if (lineItemsWithStatus.every(item => item.status === 'not_available')) {
+        // All items are not available, show confirmation dialog
+        if (confirm('All items are marked as Not Available. Do you want to proceed to Material to Procure stage?')) {
+          currentStage = 2; // Move to Material to Procure stage
+          notAvailableItems = lineItemsWithStatus.filter(item => item.status === 'not_available');
+        }
+      } 
     }
   }
 
@@ -211,51 +311,44 @@ function goToPreviousStage() {
     
     switch (currentStage) {
     case 0:
-      if (!Stage0Data.SOCategory || !Stage0Data.projectManagerName) {
-        alert('Please fill in SO Category and Project Manager Name.');
-        return;
+      try {
+        await fetch(`/submit-stage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stage: currentStage, data: Stage0Data })});
       }
-              else{
-          try {
-            await fetch(`/submit-stage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ stage: currentStage, data: Stage0Data })});
-          }
-          catch (error) {
+      catch (error) {
           console.error('Error:', error);
-        }}
-      break;
+      } break;
+      
+      
     case 1:
       if (!allStatusesFilled) {
         alert('Please select a status for all line items before submitting.');
         return;
       }
-      else if (!isCurrentDCFilled()) {
+      // Check if all items are marked as "Not Required"
+      const allNotRequired = lineItemsWithStatus.every(item => item.status === 'not_required');
+        
+      // Only check isCurrentDCFilled() if not all items are "Not Required"
+      if (!allNotRequired && !isCurrentDCFilled()) {
         alert('Please fill all fields in the current DC before submitting.');
         return;
       }
-              else{
-          try {
-            await fetch(`/submit-stage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ stage: currentStage, 
-              data: {
-              lineItems: lineItemsWithStatus,
-              dcBoxes: dcBoxes
-            } })});
-          }catch (error) {
-          console.error('Error:', error);
-          }
-        }
+      
       updateDCAmount(dcBoxes.length - 1);
       updateDCOrderTotal();
       saveCurrentState();
       alert('Logistics stage completed successfully.');
       break;
     case 2:
-      alert('Material to Procure stage completed successfully.');
+      if (allItemsSaved) {
+        alert('Material to Procure stage completed successfully.');
+        stageData[currentStage].completed = true;
+        goToNextStage();
+      } else {
+        alert("Please save all items before submitting the stage.");
+      }
       break;
     case 3:
         try {
@@ -271,12 +364,12 @@ function goToPreviousStage() {
       break;
       case 4:
     if (stageData[4].visible) {
-      if (returnPickups.every(pickup => pickup.isSaved)) {
+      if (returnPickup.isSaved) {
         alert("Return Pickup details submitted successfully.");
         stageData[4].completed = true;
         currentStage = 5; // Move to Share with Account stage
       } else {
-        alert("Please save all Return Pickup details before submitting.");
+        alert("Please save the Return Pickup details before submitting.");
         return;
       }
     } else {
@@ -286,10 +379,10 @@ function goToPreviousStage() {
     }
     break;
     case (stageData[4].visible ? 5 : 4):
-    const approvedItems = [...shipments, ...returnPickups]
+    const approvedItems = [...shipments, returnPickup]
       .filter(item => item.isSaved && item.accountStatus === 'approved')
       .map(item => item.name || `Shipment ${item.index + 1}`);
-    const rejectedItems = [...shipments, ...returnPickups]
+    const rejectedItems = [...shipments, returnPickup]
       .filter(item => item.isSaved && item.accountStatus === 'rejected')
       .map(item => item.name || `Shipment ${item.index + 1}`);
     
@@ -320,6 +413,7 @@ function goToPreviousStage() {
 
 
   // DC box related functions
+  let totalSavedDCAmount = 0;
   function calculateDCAmount(dcIndex: number) {
     return lineItemsWithStatus
       .filter((item, index) => 
@@ -331,9 +425,28 @@ function goToPreviousStage() {
   }
 
   function updateDCOrderTotal() {
+    if (allItemsNotAvailable) {
+      dcOrderTotal.subtotal = 0;
+    } else {
+      // Calculate total of unsaved line items
     dcOrderTotal.subtotal = lineItemsWithStatus
-      .filter(item => item.status === 'available' || item.status === 'need_to_purchase')
+      .filter((item) => !frozenLineItems[item.id] && (item.status === 'available' || item.status === 'need_to_purchase'))
       .reduce((sum, item) => sum + item.item_total, 0);
+    }
+    // Update the UI
+    dcOrderTotal = dcOrderTotal; // Trigger reactivity
+  }
+  
+  function getTotalSavedDCAmount() {
+    return dcBoxes
+      .filter(dc => dc.isSaved)
+      .reduce((sum, dc) => sum + dc.dcAmount, 0);
+  }
+  
+  function updateTotalSavedDCAmount() {
+    totalSavedDCAmount = dcBoxes
+      .filter(dc => dc.isSaved)
+      .reduce((sum, dc) => sum + dc.dcAmount, 0);
   }
 
   function saveCurrentState() {
@@ -345,43 +458,79 @@ function goToPreviousStage() {
     });
     // Implement actual saving logic here
   }
+  function canSaveDC(dc: DCBox): boolean {
+    return lineItemsWithStatus.every(item => item.status !== '');
+  }
 
-  function handleSave() {
-    if (!allStatusesFilled) {
+  async function handleSave() {
+    const currentDCIndex = dcBoxes.length - 1;
+    const currentDC = dcBoxes[currentDCIndex];
+  
+    if (!canSaveDC(currentDC)) {
       alert('Please select a status for all line items before saving.');
       return;
     }
 
-    if (!isCurrentDCFilled()) {
-      alert('Please fill all fields in the current DC before saving.');
-      return;
+    // If the bill type hasn't been set yet (user didn't interact with the form),
+    // set it now based on the current subtotal
+    if (!currentDC.isTypeSet) {
+        currentDC.billType = dcOrderTotal.subtotal >= 50000 ? 'E-way' : 'DC';
+        currentDC.isTypeSet = true;
     }
-    
+  
+    // Rest of the save logic
     lastSavedTimes[currentStage] = getCurrentDateTime();
 
-    const currentDCIndex = dcBoxes.length - 1;
-  const currentDC = dcBoxes[currentDCIndex];
+    // Set the DC amount to the current total before saving if it's not already saved
+    if (!currentDC.isSaved) {
+        currentDC.dcAmount = dcOrderTotal.subtotal;
+    }
+    try {
+      await fetch(`/submit-stage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage: currentStage, 
+        data: {
+        lineItems: lineItemsWithStatus,
+        dcBoxes: currentDC
+      } })});
+    }catch (error) {
+      console.error('Error:', error);
+    }
 
   // Associate newly available or purchasable items with the current DC
   lineItemsWithStatus.forEach((item, index) => {
-    if ((item.status === 'available' || item.status === 'need_to_purchase') && !frozenLineItems[index]) {
-      frozenLineItems[index] = true;
+    if ((item.status === 'available' || item.status === 'need_to_purchase') && !frozenLineItems[item.id]) {
+      frozenLineItems[item.id] = true;
       currentDC.lineItemIndices.push(index);
     }
+    if ((item.status === 'not_required') && !frozenLineItems[item.id]) {
+        frozenLineItems[item.id] = true;
+      }
+  });
+  // Ensure all items in the current DC are marked as frozen
+  currentDC.lineItemIndices.forEach(index => {
+    frozenLineItems[lineItemsWithStatus[index].id] = true;
   });
 
   notAvailableItems = lineItemsWithStatus.filter(item => item.status === 'not_available');
 
-
   currentDC.isSaved = true;
-  dcBoxes = dcBoxes; // Trigger reactivity
+  dcBoxes = [...dcBoxes];
 
-  updateDCAmount(currentDCIndex);
+  // Reset the total amount for the next DC
+  updateDCOrderTotal();
+      
+  // Update the total of saved DCs
+  updateTotalSavedDCAmount();
   saveCurrentState();
   canAccessNextStage = true;
-  alert('Progress saved. You can now access the next stage or add more DCs.');
-}
-
+  if (allItemsNotAvailable) {
+        alert('All items are marked as Not Available. You cannot add more DCs.');
+      } else {
+        alert('Progress saved. You can now add more DCs or proceed to the next stage.');
+      }
+  }
 
   // Function to remove DC
   function removeDC(index: number) {
@@ -393,43 +542,63 @@ function goToPreviousStage() {
 
   // Function to add more DC
   function addMoreDC() {
-  if (!isCurrentDCFilled()) {
-    alert('Fill up and save the current DC before adding a new one.');
-    return;
+    const currentDC = dcBoxes[dcBoxes.length - 1];
+    if (!currentDC.isSaved) {
+      alert('Please save the current DC before adding a new one.');
+      return;
   }
 
   dcCounter++;
-  dcBoxes.push({
-        customName: '',
-        trackingNo: '', 
-        dispatchedDate: '', 
-        deliveryDate: '', 
-        dcAmount: 0, 
-        attachment: null, 
-        lineItemCount: 0, 
-        lineItemIndices: [],
-        isSaved: false, 
-        SONumber: salesOrder.salesorder_number
-  });
-  dcBoxes = dcBoxes; // Trigger reactivity
+  dcBoxes = [...dcBoxes, {
+    dcDetails: { dcNumber: '', customerName: '', companyName: '', dcDate: '', total: '', status: '', challanStatus: '', referenceNumber: '', branchName: '' },
+    SONumber: salesOrder.salesorder_number,
+	  customName: '',
+	  trackingNo: '',
+	  dispatchedDate: '',
+	  deliveryDate: '',
+	  dcAmount: 0,
+	  attachment: '',
+	  lineItemCount: 0,
+	  lineItemIndices: [],
+	  isSaved: false,
+	  fileName: '',
+	  filePreviewUrl: null,
+	  status: '' ,
+    billType: 'DC', // Default to DC
+    isTypeSet: false, 
+  }];
+    // Recalculate the total for the new DC
+    updateDCOrderTotal();
+  }
+function setBillType(index: number) {
+  if (!dcBoxes[index].isTypeSet) {
+    dcBoxes[index].billType = dcOrderTotal.subtotal >= 50000 ? 'E-way' : 'DC';
+    dcBoxes[index].isTypeSet = true;
+    dcBoxes = [...dcBoxes]; // Trigger reactivity
+  }
 }
 
   // Function to check if current DC is filled  
   function isCurrentDCFilled() {
     const currentDC = dcBoxes[dcBoxes.length - 1];
-    return currentDC.customName.trim() &&  currentDC.trackingNo && currentDC.dispatchedDate && currentDC.deliveryDate && (currentDC.attachment || fileName || filePreviewUrl);
+    return currentDC.customName.trim() && 
+        currentDC.trackingNo && 
+        currentDC.dispatchedDate && 
+        currentDC.deliveryDate && 
+        (currentDC.attachment || currentDC.fileName || currentDC.filePreviewUrl);
   }
 
 // Function to update DC amount
 function updateDCAmount(dcIndex: number) {
   const dc = dcBoxes[dcIndex];
+  if (!dc.isSaved) {
   dc.dcAmount = dc.lineItemIndices.reduce((sum, index) => {
     const item = lineItemsWithStatus[index];
     return sum + item.item_total;
   }, 0);
   dcBoxes = dcBoxes; // Trigger reactivity
+  }
 }
-
   // File handling functions
   // Reactive statement for partial delivery and DC order total
   $: {
@@ -502,39 +671,38 @@ function updateDCAmount(dcIndex: number) {
   let fileName: string = '';
 
   // Function to handle file change
-  async function handleFileChange(event: Event, index: number) {
+  async function handleFileChange(event: Event, dcIndex: number) {
     const input = event.target as HTMLInputElement;
     const file = input.files?.[0];
     
       if (file) {
         try{
           const base64String = await convertFileToBase64(file);
-          dcBoxes[index] = {
-        ...dcBoxes[index],
-        attachment: base64String
-        };filePreviewUrl = URL.createObjectURL(file);
-          fileName = file.name;
+          dcBoxes[dcIndex].fileName = file.name;
+          dcBoxes[dcIndex].filePreviewUrl = URL.createObjectURL(file);
+          dcBoxes[dcIndex].attachment = base64String;
         }catch (error) {
           console.error('Error converting file to base64:', error);}
       }
+      dcBoxes = [...dcBoxes]; // Trigger reactivity
     }
 
-
   // Function to open preview modal
-  function openPreviewModal() {
-    if (filePreviewUrl) {
+  function openPreviewModal(dcIndex: number) {
+    const dc = dcBoxes[dcIndex];
+    if (dc.filePreviewUrl) {
       const modal = document.getElementById('previewModal');
       const previewImage = document.getElementById('previewImage') as HTMLImageElement;
       const previewIframe = document.getElementById('previewIframe') as HTMLIFrameElement;
       
       if (modal && previewImage && previewIframe) {
         modal.style.display = 'block';
-        if (fileName.toLowerCase().endsWith('.pdf')) {
-          previewIframe.src = filePreviewUrl;
+        if (dc.fileName.toLowerCase().endsWith('.pdf')) {
+          previewIframe.src = dc.filePreviewUrl;
           previewIframe.style.display = 'block';
           previewImage.style.display = 'none';
         } else {
-          previewImage.src = filePreviewUrl;
+          previewImage.src = dc.filePreviewUrl;
           previewImage.style.display = 'block';
           previewIframe.style.display = 'none';
         }
@@ -555,10 +723,11 @@ function downloadFileFromUrl(url: string | null, fileName: string) {
   if (url) {
     const a = document.createElement('a');
     a.href = url;
-    a.download = fileName;
+    a.download = fileName || 'download';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   } else {
     console.error('No file available for download');
   }
@@ -576,45 +745,156 @@ function downloadFileFromUrl(url: string | null, fileName: string) {
 let showLogisticsAlert = false;
 
 
-function handleAvailabilityChange(index: any) {
-  showSaveButton = notAvailableItems.some(item => item.isAvailable && !item.isAvailabilityFrozen);
+function handleAvailabilityChange(itemId: string, newStatus: 'available' | 'need_to_purchase') {
+  const item = notAvailableItems.find(item => item.id === itemId);
+  if (item) {
+    if (newStatus === 'available') {
+      item.isAvailable = true;
+      item.needToPurchaseLocally = false;
+    } else if (newStatus === 'need_to_purchase') {
+      item.needToPurchaseLocally = true;
+      item.isAvailable = false;
+    }
+    
+    // Reset the serialNo and invoiceNo when changing status
+    item.serialNo = '';
+    item.invoiceNo = '';
+    item.attachment = undefined;
+
+    // Add the item to newlyAvailableItems
+    if (!newlyAvailableItems.some(newItem => newItem.id === item.id)) {
+      newlyAvailableItems.push({
+        id: item.id,
+        name: item.name,
+        status: newStatus
+      });
+    }
+
+    // Trigger reactivity
+    notAvailableItems = notAvailableItems;
+    newlyAvailableItems = newlyAvailableItems;
+    showSaveButton = true;
+    allItemsSaved = false;
+  }
+}
+
+function handleAttachmentChange(event: Event, itemId: string) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  
+  if (file) {
+    const item = notAvailableItems.find(item => item.id === itemId);
+    if (item) {
+      item.attachment = file;
+      notAvailableItems = notAvailableItems; // Trigger reactivity
+    }
+  }
 }
 
 function handleSaveMaterialToProcure() {
-  const itemsToMarkAvailable = notAvailableItems.filter(item => item.isAvailable && !item.isAvailabilityFrozen);
+  const itemsToUpdate = notAvailableItems.filter(item => item.isAvailable || item.needToPurchaseLocally);
   
-  if (itemsToMarkAvailable.length > 0) {
-    const itemNames = itemsToMarkAvailable.map(item => item.name).join(", ");
-    if (confirm(`Are you sure you want to mark the following items as Available?\n\n${itemNames}`)) {
-      newlyAvailableItems = itemsToMarkAvailable.map(item => item.name);
+  if (itemsToUpdate.length === 0) {
+    alert("No changes to save.");
+    return;
+  }
+
+  const invalidItems = itemsToUpdate.filter(item => !item.serialNo || !item.invoiceNo);
+  if (invalidItems.length > 0) {
+    alert("Please fill in both Serial No. and Invoice No. for all selected items.");
+    return;
+  }
+
+  const itemSummary = itemsToUpdate.map(item => 
+    `${item.name}: ${item.isAvailable ? 'Available' : 'Need to purchase locally'}`
+  ).join('\n');
+
+  if (confirm(`Are you sure you want to update the following items?\n\n${itemSummary}`)) {
+    itemsToUpdate.forEach(item => {
+      item.isAvailabilityFrozen = true;
+      const index = lineItemsWithStatus.findIndex(lineItem => lineItem.id === item.id);
+      if (index !== -1) {
+        lineItemsWithStatus[index].status = item.isAvailable ? 'available' : 'need_to_purchase';
+        lineItemsWithStatus[index].serialNo = item.serialNo;
+        lineItemsWithStatus[index].invoiceNo = item.invoiceNo;
+        lineItemsWithStatus[index].attachment = item.attachment;
+      }
       
-      itemsToMarkAvailable.forEach(item => {
-        item.isAvailabilityFrozen = true;
-        const index = lineItemsWithStatus.findIndex(lineItem => lineItem.name === item.name);
-        if (index !== -1) {
-          lineItemsWithStatus[index].status = 'available';
-        }
-      });
-      
-      notAvailableItems = notAvailableItems.filter(item => !item.isAvailable);
-      showSaveButton = false;
-      showLogisticsAlert = true;
-      
-      // Update the reactive variables
-      lineItemsWithStatus = [...lineItemsWithStatus];
-      notAvailableItems = [...notAvailableItems];
-      
-      alert("Items have been marked as Available. Please complete the order in the Logistics stage.");
+      if (!newlyAvailableItems.some(newItem => newItem.id === item.id)) {
+        newlyAvailableItems.push({
+          id: item.id,
+          name: item.name,
+          status: item.isAvailable ? 'available' : 'need_to_purchase'
+        });
+      }
+    });
+    
+    notAvailableItems = notAvailableItems.filter(item => !item.isAvailable && !item.needToPurchaseLocally);
+    showSaveButton = false;
+    showLogisticsAlert = true;
+    
+    // Update the reactive variables
+    lineItemsWithStatus = [...lineItemsWithStatus];
+    notAvailableItems = [...notAvailableItems];
+    newlyAvailableItems = [...newlyAvailableItems];
+    
+    const availableItems = itemsToUpdate.filter(item => item.isAvailable).map(item => item.name);
+    const purchaseLocallyItems = itemsToUpdate.filter(item => item.needToPurchaseLocally).map(item => item.name);
+    
+    let alertMessage = "";
+    if (availableItems.length > 0) {
+      alertMessage += `The following items are now available:\n${availableItems.join(", ")}\n\n`;
+    }
+    if (purchaseLocallyItems.length > 0) {
+      alertMessage += `The following items need to be purchased locally:\n${purchaseLocallyItems.join(", ")}\n\n`;
+    }
+    alertMessage += "Please complete the order in the Logistics stage.";
+    
+    alert(alertMessage);
+
+    // Check if all items are saved
+    allItemsSaved = notAvailableItems.length === 0;
+  }
+}
+
+function openPreviewModalMaterial(item: LineItem) {
+  const modal = document.getElementById('previewModal');
+  const previewImage = document.getElementById('previewImage') as HTMLImageElement;
+  const previewIframe = document.getElementById('previewIframe') as HTMLIFrameElement;
+  
+  if (modal && previewImage && previewIframe && item.attachment) {
+    modal.style.display = 'block';
+    const fileUrl = URL.createObjectURL(item.attachment);
+    if (item.attachment.type === 'application/pdf') {
+      previewIframe.src = fileUrl;
+      previewIframe.style.display = 'block';
+      previewImage.style.display = 'none';
+    } else {
+      previewImage.src = fileUrl;
+      previewImage.style.display = 'block';
+      previewIframe.style.display = 'none';
     }
   }
 }
 
   // Stage 3 related functions
+  interface Shipment {
+    // ... other properties ...
+    installationFile?: File;
+    installationFileName?: string;
+    serviceFile?: File;
+    serviceFileName?: string;
+    // ... other properties ...
+  }
   let shipments: any[] = [{ isSaved: false, activeTab: 'installation', rejected: false, rejectionRemark: '' }];
 
   function validateMobileNumber(number: string): boolean {
     const regex = /^\d{10}$/;
     return regex.test(number);
+  }
+  function handleMobileInput(event: Event) {
+      const input = event.target as HTMLInputElement;
+      input.value = input.value.replace(/\D/g, '').slice(0, 10);
   }
 
   function saveShipment(index: number) {
@@ -626,8 +906,10 @@ function handleSaveMaterialToProcure() {
     shipment.accountRemark = '';
     shipment.isEditing = false;
     alert(`${shipment.activeTab === 'installation' ? 'Installation' : 'Service'} details saved successfully.`);
+    console.log('Saved shipment:', shipment); // Debug log
   } else {
     alert(`Please fill up all the ${shipment.activeTab === 'installation' ? 'installation' : 'service'} details before saving.`);
+    console.log('Invalid shipment:', shipment); // Debug log
   }
   lastSavedTimes[currentStage] = getCurrentDateTime();
 }
@@ -688,22 +970,19 @@ function handleSaveMaterialToProcure() {
   }
 }
 
-function downloadFile(file: File | string | null) {
-  if (!file) return;
-
-  const fileUrl = typeof file === 'string' ? file : URL.createObjectURL(file);
-  const fileName = typeof file === 'string' ? 'file' : file.name;
-
-  const a = document.createElement('a');
-  a.href = fileUrl;
-  a.download = fileName;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-
-  if (typeof file !== 'string') {
-    URL.revokeObjectURL(fileUrl);
-  }
+function downloadFile(file: File | undefined, fileName: string) {
+    if (!file) {
+      console.error('No file to download');
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName || 'download';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
 }
 
 function closeFilePreviewModal() {
@@ -713,78 +992,48 @@ function closeFilePreviewModal() {
   }
 }
 
-function handleMobileInput(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const oldValue = input.value;
-  const newValue = oldValue.replace(/\D/g, '').slice(0, 10);
 
-  
-  
-  if (oldValue !== newValue) {
-    input.value = newValue;
-    alert("Please enter only digits. The mobile number should be 10 digits long.");
-  }
-}
-
- 
-  let returnPickups: Array<{
-    name: string;
-    mobile: string;
-    remark: string;
-    file: File | null;
-    fileName: string;
-    filePreviewUrl: string | null;
-    isSaved: boolean;
-    accountStatus?: string;
-    accountRemark?: any;
-    isEditing?: boolean;
-    isDataSaved: boolean;
-    rejected: boolean;
-    rejectionRemark: any;
-    dcNumber: any;
-    trackingNo: any;
-    dcAmount: string;
-    dispatchedDate: any;
-    deliveryDate: any;
-    dcaccountRemark?: any;
-  }> = [
-    // Initial returnPickups object...
-    {
+let returnPickup = {
     name: '',
     mobile: '',
     remark: '',
-    file: null,
+    file: null as File | any,
     fileName: '',
-    filePreviewUrl: null,
+    filePreviewUrl: null as string | null,
     isSaved: false,
     isDataSaved: false,
     rejected: false,
     rejectionRemark: '',
+    accountStatus: '',
+    accountRemark: '',
+    isEditing: false,
     dcNumber: '',
     trackingNo: '',
     dcAmount: '',
     dispatchedDate: '',
-    deliveryDate: ''
-  }
-  ];
+    deliveryDate: '',
+    dcaccountRemark: ''
+  };
 
   let returnPickupRequested = false;
   let showReturnPickupConfirmation = false;
+  let showConfirmationPopup = false;
+  let returnPickupDetailsSaved = false;
   let returnPickupName = '';
   let returnPickupMobile = '';
   let returnPickupRemark = '';
-  let showConfirmationPopup = false;
-  let returnPickupDetailsSaved = false;
 
   function toggleReturnPickup() {
-  if (returnPickupRequested) {
-    // If cancelling, just reset the state
-    returnPickupRequested = false;
-    resetReturnPickupFields();
-  } else {
-    // If requesting, show the details form
-    returnPickupRequested = true;
-  }
+    if (returnPickupRequested && !returnPickupDetailsSaved) {
+      // If cancelling and details are not saved, reset the state
+      returnPickupRequested = false;
+      returnPickupName = '';
+      returnPickupMobile = '';
+      returnPickupRemark = '';
+    } else if (!returnPickupRequested) {
+      // If requesting, show the details form
+      returnPickupRequested = true;
+    }
 }
 
 function saveReturnPickupDetails() {
@@ -803,7 +1052,7 @@ async function confirmReturnPickup() {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ stage: currentStage, data: Stage4Data })});
-    alert("Return Pickup request confirmed. Details have been saved.");
+    alert("Return Pickup request confirmed. Details have been saved and can no longer be edited.");
   }
   catch (error) {
     console.error('Error:', error);
@@ -828,44 +1077,40 @@ function handleReturnPickupMobileInput(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   
-    if (file) {
-      try {
-        const base64String = await convertFileToBase64(file);
-        Stage4Data.Attachment = base64String;
-    }catch (error) {
-          console.error('Error converting file to base64:', error);}
-    } lastSavedTimes[currentStage] = getCurrentDateTime();
-}
+  if (file && !returnPickup.isSaved) {
+      returnPickup.file = file;
+      returnPickup.fileName = file.name;
+      returnPickup = {...returnPickup}; // Trigger reactivity
+    }
+    lastSavedTimes[currentStage] = getCurrentDateTime();
+  }
 
-//   function saveReturnPickup() {
-//   if (isReturnPickupComplete(returnPickups)) {
-//     returnPickups.isSaved = true;
-//     returnPickups.accountStatus = '';
-//     returnPickups.accountRemark = '';
-//     returnPickups.isEditing = false;
+  function saveReturnPickup() {
+    if (isReturnPickupComplete()) {
+      returnPickup.isSaved = true;
+      returnPickup.isDataSaved = true;
+      alert("Return Pickup details saved successfully. You can no longer edit this entry.");
+    } else {
+      alert("Please fill up all the Return Pickup details.");
+    }
+  }
 
-//     alert("Return Pickup details saved successfully. You can no longer edit this entry.");
-//   } else {
-//     alert("Please fill up all the Return Pickup details.");
-//   }
-// }
+  function isReturnPickupComplete(): boolean {
+    return (
+      returnPickup.name.trim() !== '' &&
+      returnPickup.mobile.length === 10 &&
+      returnPickup.remark.trim() !== '' &&
+      returnPickup.file !== null &&
+      returnPickup.dcNumber.trim() !== '' &&
+      returnPickup.trackingNo.trim() !== '' &&
+      returnPickup.dcAmount.trim() !== '' &&
+      returnPickup.dispatchedDate !== '' &&
+      returnPickup.deliveryDate !== '' &&
+      returnPickup.dcaccountRemark.trim() !== ''
+    );
+  }
 
-function isReturnPickupComplete(Stage4Data:any): boolean {
-  return (
-    Stage4Data.ReturnPickupName.trim() !== '' &&
-    Stage4Data.ReturnPickupMobile.length === 10 &&
-    Stage4Data.ReturnPickupRemark.trim() !== '' &&
-    Stage4Data.Attachment !== null &&
-    Stage4Data.DCNumber.trim() !== '' &&
-    Stage4Data.CourierTrackNo.trim() !== '' &&
-    Stage4Data.DCAmount.trim() !== '' &&
-    Stage4Data.DispatchDate !== '' &&
-    Stage4Data.DeliveryDate !== '' &&
-    Stage4Data.Remark.trim() !== ''
-  );
-}
-
-  function formatAmountreturn(event: Event, index: number) {
+  function formatAmountreturn(event: Event) {
   const input = event.target as HTMLInputElement;
   let value = input.value.replace(/[^\d.]/g, '');
   
@@ -886,12 +1131,10 @@ function isReturnPickupComplete(Stage4Data:any): boolean {
     formatted += '.' + decimalPart;
   }
 
-  // Update the input value and the returnPickups array
+  // Update the input value and the returnPickup object
   input.value = formatted;
-  returnPickups[index].dcAmount = formatted;
-  returnPickups = [...returnPickups];
+    returnPickup.dcAmount = formatted;
 }
-
 
 function getCurrentDateTime(): string {
   return new Date().toLocaleString();
@@ -901,12 +1144,10 @@ function getCurrentDate(): string {
   return new Date().toISOString().split('T')[0];
 }
 
-function updateDeliveryDateMin(index: number) {
-  const pickup = returnPickups[index];
-  if (pickup.dispatchedDate > pickup.deliveryDate) {
-    pickup.deliveryDate = pickup.dispatchedDate;
-  }
-  returnPickups = [...returnPickups];
+function updateDeliveryDateMin() {
+    if (returnPickup.dispatchedDate > returnPickup.deliveryDate) {
+      returnPickup.deliveryDate = returnPickup.dispatchedDate;
+    }
 }
 
   // Share with account related variables
@@ -944,15 +1185,54 @@ function updateDeliveryDateMin(index: number) {
     stageData[2].visible = false;
   }
 }
+$: allItemsNotAvailable = lineItemsWithStatus.every(item => item.status === 'not_available');
 
   // Time tracking
   let stageStartTimes: { [key: number]: string } = {};
   let lastSavedTimes: { [key: number]: string } = {};
   let lastSubmittedTimes: { [key: number]: string } = {};
+
+  async function handleFieldUpdate(fieldName: string, oldValue: string, newValue: string) {
+    const action = `Updated ${fieldName} from "${oldValue}" to "${newValue}"`;
+    
+    try {
+      const response = await fetch('/api/log-activity', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          salesOrderId: Stage0Data.SONumber,
+          username: username,
+          role: userRole,
+          action: action
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to log activity');
+      }
+
+      // Update the local state
+      if (fieldName === "SO Category") {
+        Stage0Data.SOCategory = newValue;
+      } else if (fieldName === "Project Manager") {
+        Stage0Data.projectManagerName = newValue;
+      }
+
+      // Invalidate and refresh the page data
+      await invalidateAll();
+    } catch (error) {
+      console.error('Error logging activity:', error);
+      // Handle the error (e.g., show a notification to the user)
+    }
+  }
+
+
 </script>
 
 
-<div   role="dialog"
+<div role="dialog"
   aria-labelledby="modal-title" 
   class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50" on:click|self={closeModal}>
   <div class="relative top-20 mx-auto p-8 border w-11/12 max-w-4xl shadow-lg rounded-lg bg-white">
@@ -1040,46 +1320,39 @@ function updateDeliveryDateMin(index: number) {
   <div class="mb-4 grid grid-cols-2 gap-4 form-card">
     <div>
       <label class="block text-gray-700 text-sm font-bold mb-2" for="so_category">
-        SO Category *
+        SO Category
       </label>
-      <select 
+      <input
         id="so_category" 
-        bind:value={Stage0Data.SOCategory} 
-        on:change={(e) => handleFieldUpdate("SO Category", soCategory, e.target.value)}
-        class="w-full px-3 py-2 border rounded-md" 
-        disabled={!isEditing} 
-        required
+        value={salesOrder.custom_field_hash.cf_so_cat} 
+        class="w-full px-3 py-2 border rounded-md" disabled
       >
-        <option value="">Select SO Category</option>
-        <option value="CAPEX Project">CAPEX Project</option>
-        <option value="OPEX Project">OPEX Project</option>
-        <option value="CAPEX Project ABSW">CAPEX Project ABSW</option>
-        <option value="OPEX Project ABSW">OPEX Project ABSW</option>
-        <option value="Replacement under Warranty">Replacement under Warranty</option>
-        <option value="CAPEX Service">CAPEX Service</option>
-        <option value="CAPEX Service - ABSW">CAPEX Service - ABSW</option>
-        <option value="FOC-POC">FOC-POC</option>
-        <option value="OPEX Service">OPEX Service</option>
-        <option value="CAMC">CAMC</option>
-      </select>
+    
     </div>
     <div>
       <label class="block text-gray-700 text-sm font-bold mb-2" for="project_manager">
-        Project Manager Name *
+        Project Manager Name
       </label>
-      <select 
+      <input 
         id="project_manager" 
-        on:change={(e) => handleFieldUpdate("Project Manager", projectManagerName, e.target.value)}
-        bind:value={Stage0Data.projectManagerName} 
+        value={salesOrder.custom_field_hash.cf_project_manager_name} 
+        class="w-full px-3 py-2 border rounded-md" disabled
+      >
+    </div>
+    <div>
+      <label class="block text-gray-700 text-sm font-bold mb-2" for="client_expected_date">
+        Client Expected Date of Handover *
+      </label>
+      <input 
+        type="date" 
+        id="client_expected_date" 
+        bind:value={Stage0Data.clientExpectedDate} 
+        on:change={(e) => handleFieldUpdate("Client Expected Date of Handover", Stage0Data.clientExpectedDate, e.target.value)}
+        min={minDate}
         class="w-full px-3 py-2 border rounded-md" 
         disabled={!isEditing} 
         required
       >
-        <option value="">Select Project Manager</option>
-        {#each projectManagerName as name}
-          <option value={name}>{name}</option>
-        {/each}
-      </select>
     </div>
     
   </div>
@@ -1089,12 +1362,24 @@ function updateDeliveryDateMin(index: number) {
           <!-- Logistics stage content -->
           {#if showLogisticsAlert}
           <div class="bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4 mb-4 relative form-card" role="alert">
-            <p class="font-bold">The following items are now available:</p>
-            <ul class="list-disc list-inside mt-2">
-              {#each newlyAvailableItems as item}
-                <li>{item}</li>
+            <p class="font-bold">The following items have new statuses:</p>
+            {#if newlyAvailableItems.some(item => item.status === 'available')}
+            <p class="font-semibold mt-2">Available Items:</p>
+            <ul class="list-disc list-inside mt-1">
+        {#each newlyAvailableItems.filter(item => item.status === 'available') as item}
+          <li>{item.name}</li>
               {/each}
             </ul>
+            {/if}
+    
+            {#if newlyAvailableItems.some(item => item.status === 'need_to_purchase')}
+              <p class="font-semibold mt-2">Need to Purchase Locally:</p>
+              <ul class="list-disc list-inside mt-1">
+                {#each newlyAvailableItems.filter(item => item.status === 'need_to_purchase') as item}
+                  <li>{item.name}</li>
+                {/each}
+              </ul>
+            {/if}
             <p class="mt-2">Please complete the order for these items in the Logistics stage.</p>
             <button 
               class="absolute top-0 right-0 mt-2 mr-2 text-yellow-700 hover:text-yellow-900"
@@ -1122,7 +1407,7 @@ function updateDeliveryDateMin(index: number) {
                   </tr>
                 </thead>
                 <tbody class="bg-white divide-y divide-gray-200">
-                  {#each lineItemsWithStatus as item, index}
+                  {#each lineItemsWithStatus as item, index (item.id)}
                     <tr>
                       <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{index + 1}</td>
                       <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.name}</td>
@@ -1130,7 +1415,7 @@ function updateDeliveryDateMin(index: number) {
                       <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatCurrency(item.rate)}</td>
                       <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatCurrency(item.item_total)}</td>
                       <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        <select bind:value={lineItemsWithStatus[index].status} class=" w-32 px-2 py-1 border rounded-md" disabled={frozenLineItems[index]} >
+                        <select bind:value={lineItemsWithStatus[index].status} class=" w-32 px-2 py-1 border rounded-md" disabled={frozenLineItems[item.id]} >
                           <option value="">Select status</option>
                           <option value="available">Available</option>
                           <option value="not_available">Not Available</option>
@@ -1144,6 +1429,17 @@ function updateDeliveryDateMin(index: number) {
               </table>
             </div>
           </div>
+          <!-- New reactive statement to check if all items are Not Available or Not Required -->
+  
+          {#if lineItemsWithStatus.every(item => item.status === 'not_available')}
+          <div class="mt-4 mb-4 text-center text-lg font-bold text-red-600">
+            All items are marked as Not Available. You can submit directly.
+          </div>
+        {:else if lineItemsWithStatus.every(item => item.status === 'not_required')}
+          <div class="mt-4 mb-4 text-center text-lg font-bold text-green-600">
+            All items are marked as Not Required. You can submit directly.
+          </div>
+        {:else}
         <!-- Partial Delivery toggle -->
   {#if lineItemsWithStatus.some(item => item.status === 'not_available')}
   <div class="mt-4">
@@ -1156,25 +1452,24 @@ function updateDeliveryDateMin(index: number) {
 
 
 <!-- DC Order Total section -->
-
-<div class="mt-4 form-card">
-  <h4 class="text-lg font-bold mb-2 inline-block mr-2">Total Amount:</h4>
-  <p class="inline-block">{formatCurrency(dcOrderTotal.subtotal)}</p>
+<div class="flex justify-between items-center mt-4">
+  <div class="flex-1">
+    <h4 class="text-lg font-bold mb-2 inline-block mr-2">Current Unsaved Total:</h4>
+    <p class="inline-block">{formatCurrency(dcOrderTotal.subtotal)}</p>
+  </div>
+  <div class="w-px h-10 bg-gray-300 mx-4"></div>
+  <div class="flex-1 text-right">
+    <h4 class="text-lg font-bold mb-2 inline-block mr-2">Total of Saved DCs or E-ways:</h4>
+    <p class="inline-block">{formatCurrency(totalSavedDCAmount)}</p>
+  </div>
 </div>
 
-        <!-- Collapsible "Add More" section -->
-        <div class="mt-6">
-          <button
-            type="button"
-            class="w-full py-2 px-4 bg-gray-100 text-left text-gray-700 font-medium rounded-lg hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-400 transition-all duration-200"
-            on:click={() => showAddMore = !showAddMore}
-          >
-            {showAddMore ? '- Hide "DC Section" ' : '+ Show "DC Section" '}
-          </button>
-          {#if showAddMore}
-            <div class="mt-4 p-4 bg-gray-50 rounded-lg" transition:slide>
-                <!-- DC Boxes -->
-              {#each dcBoxes as dc, index}
+         <!-- Display current unsaved total -->
+  <!-- <div class="mt-4">
+    <h4 class="text-lg font-bold mb-2 inline-block mr-2">Current Unsaved Total:</h4>
+    <p class="inline-block">{formatCurrency(dcOrderTotal.subtotal)}</p>
+  </div> -->
+        {#each dcBoxes as dc, index}
               <div class="bg-white bg-opacity-50 p-6 rounded-lg shadow-md mb-8 relative form-card">
                 {#if !dc.isSaved && index !== 0}
                   <button
@@ -1185,8 +1480,98 @@ function updateDeliveryDateMin(index: number) {
                     ×
                   </button>
                 {/if}
-                <div class="flex items-center mb-4 ">
-                  <span class="text-xl font-semibold mr-2">{dcOrderTotal.subtotal >= 50000 ? 'E-way:' : 'DC:'}</span>
+                <div class="bg-white bg-opacity-50 p-6 rounded-lg shadow-md mb-8">
+                  <h4 class="text-lg font-bold mb-4">DC or E-way Bill Details</h4>
+                  <div class="flex items-center mb-4 space-x-4">
+                  <div class="flex items-center mb-4 space-x-4">
+                    <div class="flex-1">
+                      <label for="dc-number-{index}" class="block text-sm font-medium text-gray-700">
+                        {dc.billType === 'E-way' ? 'E-way Number:' : 'DC Number:'}
+                      </label>
+                      <input 
+                        type="text" 
+                        id="dc-number-{index}"
+                        bind:value={dc.customName} 
+                        placeholder={dc.billType === 'E-way' ? "Enter E-way number" : "Enter DC number"}
+                        class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"
+                        disabled={dc.isSaved}
+                      >
+                      {#if dc.status}
+                      <div class="mb-4">
+                        <span class={`${dc.status === 'Valid' ? 'text-green-600' : 'text-red-600'}`}>
+                          {dc.status}
+                        </span>
+                      </div>
+                    {/if}
+            
+                    </div>
+                    {#if dc.dcDetails && dc.status === 'Valid'}
+                  <div class="flex-1">
+                    <label for="dc-status-{index}" class="block text-sm font-medium text-gray-700">Status:</label>
+                    <input 
+                      id="dc-status-{index}" 
+                      value="{dc.dcDetails.challanStatus}" 
+                      class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"
+                      disabled
+                    />                    
+                  </div>
+                {/if}
+                
+                  <button
+                  type="button"
+                  class="ml-2 bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
+                  on:click={() => validateAndShowDetails(dc.customName, index)}
+                >
+                  Validate
+                </button>
+                {#if dc.dcDetails && dc.status === 'Valid'}
+                <button
+                  type="button"
+                  class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded"
+                  on:click={() => openDetailsPopup(dc.dcDetails)}
+                >
+                  Show Details
+                </button>
+              {/if}
+                </div>
+              </div>
+
+                                  <!-- Details Popup -->
+{#if showDetailsPopup && selectedDcDetails}
+<div class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full" id="my-modal">
+  <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+    <div class="mt-3 text-center">
+      <h3 class="text-lg leading-6 font-medium text-gray-900">DC Details</h3>
+      <div class="mt-2 px-7 py-3">
+        <p class="text-sm text-gray-500 mb-1"><strong>DC Number:</strong> {selectedDcDetails.dcNumber}</p>
+        <p class="text-sm text-gray-500 mb-1"><strong>Customer Name:</strong> {selectedDcDetails.customerName}</p>
+        <p class="text-sm text-gray-500 mb-1"><strong>Company Name:</strong> {selectedDcDetails.companyName}</p>
+        <p class="text-sm text-gray-500 mb-1"><strong>Date:</strong> {selectedDcDetails.dcDate}</p>
+        <p class="text-sm text-gray-500 mb-1"><strong>Total:</strong> {selectedDcDetails.total.toFixed(2)} INR</p>
+        <p class="text-sm text-gray-500 mb-1"><strong>Status:</strong> {selectedDcDetails.status}</p>
+        <p class="text-sm text-gray-500 mb-1"><strong>Challan Status:</strong> {selectedDcDetails.challanStatus}</p>
+        <p class="text-sm text-gray-500 mb-1"><strong>Reference Number:</strong> {selectedDcDetails.referenceNumber}</p>
+        <p class="text-sm text-gray-500 mb-1"><strong>Branch Name:</strong> {selectedDcDetails.branchName}</p>
+      </div>
+      <div class="items-center px-4 py-3">
+        <button
+          id="ok-btn"
+          class="px-4 py-2 bg-blue-500 text-white text-base font-medium rounded-md w-full shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-300"
+          on:click={closeDetailsPopup}
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+{/if}
+
+              
+              <!-- DC Boxes -->
+              
+                <!-- <div class="flex items-center mb-4">
+                  <span class="text-xl font-semibold mr-2">{dcOrderTotal.subtotal >= 50000 ? 'E-way :' : 'DC :'}</span>
                   <input 
                     type="text" 
                     bind:value={dc.customName} 
@@ -1194,16 +1579,16 @@ function updateDeliveryDateMin(index: number) {
                     class="border-b-2 border-gray-300 focus:border-blue-500 outline-1 px-2 py-1"
                     required disabled={dc.isSaved}
                   >
-                </div>
+                </div> -->
                 <div class="flex justify-center mb-8">
                   <div class="bill-type-buttons flex gap-6">
                     <button
-                      class="px-8 py-3 border rounded-lg shadow-md {dcOrderTotal.subtotal < 50000 ? 'bg-green-500 text-white border-green-500' : 'bg-white border-gray-300 text-gray-700'}"
+                      class="px-8 py-3 border rounded-lg shadow-md {dc.billType === 'DC' ? 'bg-green-500 text-white border-green-500' : 'bg-white border-gray-300 text-gray-700'}"
                     >
                       DC Bill
                     </button>
                     <button
-                      class="px-8 py-3 border rounded-lg shadow-md {dcOrderTotal.subtotal >= 50000 ? 'bg-green-500 text-white border-green-500' : 'bg-white border-gray-300 text-gray-700'}"
+                     class="px-8 py-3 border rounded-lg shadow-md {dc.billType === 'E-way' ? 'bg-green-500 text-white border-green-500' : 'bg-white border-gray-300 text-gray-700'}"
                     >
                       E-way Bill
                     </button>
@@ -1213,50 +1598,56 @@ function updateDeliveryDateMin(index: number) {
                 <div class="space-y-4">
                   <div class="flex space-x-4">
                     <div class="flex-1">
-                      <label for="tracking-no-{index}" class="block text-sm font-medium text-gray-700">Courier's tracking no.:</label>
+                      <label for="tracking-no-{index}" class="block text-sm font-medium text-gray-700">POD Number:</label>
                       <input type="text" id="tracking-no-{index}" bind:value={dc.trackingNo} class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" required disabled={dc.isSaved}>
                     </div>
 
                     <div class="flex-1">
-                      <label for="dispatched-date-{index}" class="block text-sm font-medium text-gray-700">Dispatched date:</label>
+                      <label for="dispatched-date-{index}" class="block text-sm font-medium text-gray-700">Dispatched Date:</label>
                       <input type="date" id="dispatched-date-{index}" bind:value={dc.dispatchedDate} class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" max={new Date().toISOString().split('T')[0]} required disabled={dc.isSaved}>
                     </div>
 
                     <div class="flex-1">
-                      <label for="delivery-date-{index}" class="block text-sm font-medium text-gray-700">Delivery date:</label>
+                      <label for="delivery-date-{index}" class="block text-sm font-medium text-gray-700">Estimated Delivery Date:</label>
                       <input type="date" id="delivery-date-{index}" bind:value={dc.deliveryDate} class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" min={dc.dispatchedDate} required disabled={dc.isSaved}>
                     </div>
 
                     <div class="flex-1">
-                      <label for="dc-amount-{index}" class="block text-sm font-medium text-gray-700">{dcOrderTotal.subtotal >= 50000 ? 'E-way Bill Amount:' : 'DC Amount:'}</label>
-                      <p id="dc-amount-{index}" class="mt-1 block w-full py-2 px-3 border border-gray-300 bg-gray-100 rounded-md shadow-sm" >{formatCurrency(dcOrderTotal.subtotal)}</p>
+                      <label for="dc-amount-{index}" class="block text-sm font-medium text-gray-700">
+                        {dc.billType === 'E-way' ? 'E-way Bill Amount:' : 'DC Amount:'}
+                      </label>
+                      <p id="dc-amount-{index}" class="mt-1 block w-full py-2 px-3 border border-gray-300 bg-gray-100 rounded-md shadow-sm">
+                        {formatCurrency(dc.isSaved ? dc.dcAmount : dcOrderTotal.subtotal)}
+                      </p>
                     </div>
                   </div>
 
                   <div class="flex-1">
-                    <label for="attachment" class="block text-sm font-medium text-gray-700">Attachment:</label>
-                    <input 
-                      type="file" 
-                      id="attachment" 
-                      on:change={handleFileChange}
-                      class="mt-1 block w-full" 
-                      accept="application/pdf,image/*" 
-                      required 
-                      disabled={dcBoxes[dcBoxes.length - 1].isSaved}
-                    >
-                    {#if filePreviewUrl}
-                      <div class="mt-2">
-                        <button 
-                          type="button" 
-                          on:click={openPreviewModal}
-                          class="text-blue-600 hover:text-blue-800 mr-2"
-                        >
-                          Preview {fileName}
+                    <label for="attachment-{index}" class="block text-sm font-medium text-gray-700">Attachment:</label>
+        {#if !dc.isSaved}
+          <input 
+            type="file" 
+            id="attachment-{index}" 
+            on:change={(e) => handleFileChange(e, index)}
+            class="mt-1 block w-full" 
+            accept="application/pdf,image/*" 
+            required 
+          >
+        {/if}
+        {#if dc.attachment || dc.fileName}
+          <div class="mt-2">
+            <span class="text-sm text-gray-600">{dc.fileName || 'File uploaded'}</span>
+            <button 
+              type="button" 
+              on:click={() => openPreviewModal(index)}
+              class="text-blue-600 hover:text-blue-800 ml-2"
+            >
+              Preview
                         </button>
                         <button 
                         type="button" 
-                        on:click={() => downloadFileFromUrl(filePreviewUrl, fileName)}
-                        class="text-green-600 hover:text-green-800"
+                        on:click={() => downloadFileFromUrl(dc.filePreviewUrl, dc.fileName)}
+              class="text-green-600 hover:text-green-800 ml-2"
                       >
                         Download
                       </button>
@@ -1273,7 +1664,6 @@ function updateDeliveryDateMin(index: number) {
                     </div>
                   </div>
 
-                <!-- Line Items Table -->
                   <!-- Line Items Table -->
               {#if dc.isSaved}
               <div class="mt-6">
@@ -1311,25 +1701,8 @@ function updateDeliveryDateMin(index: number) {
               {/if}
                 </div>
               </div>
-              {/each}
-            <!-- Add More DC Button -->
-              {#if partialDelivery}
-              <button 
-                type="button" 
-                on:click={addMoreDC} 
-                class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded mb-4"
-              >
-                Add more +
-              </button>
-              {/if}
-            </div>
-          {/if}
-        </div>
-
-
-
-
-
+              </div>
+           {/each}
 
   
   <div class="flex justify-between mt-4">
@@ -1338,13 +1711,23 @@ function updateDeliveryDateMin(index: number) {
       type="button" 
       on:click={handleSave} 
       class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded"
-      disabled={!allStatusesFilled}
+      disabled={!canSaveDC(dcBoxes[dcBoxes.length - 1])}
     >
       Save
     </button>
-
+    {#if !allItemsNotAvailable && lineItemsWithStatus.length>1}
+        <button 
+          type="button" 
+          on:click={addMoreDC} 
+          class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
+        >
+          Add more +
+        </button>
+      {/if}
   </div>
 </div>
+{/if}
+
 {:else if currentStage === 2}
 <!-- Material to Procure stage content -->
 <div class="mb-4">
@@ -1360,10 +1743,11 @@ function updateDeliveryDateMin(index: number) {
             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Rate</th>
             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Amount</th>
             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Available</th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Need to purchase locally</th>
           </tr>
         </thead>
         <tbody class="bg-white divide-y divide-gray-200">
-          {#each notAvailableItems as item, index}
+          {#each notAvailableItems as item, index (item.id)}
             <tr>
               <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{index + 1}</td>
               <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.name}</td>
@@ -1374,14 +1758,75 @@ function updateDeliveryDateMin(index: number) {
                 <input 
                   type="checkbox" 
                   bind:checked={item.isAvailable} 
-                  on:change={() => handleAvailabilityChange(index)}
-                  disabled={item.isAvailabilityFrozen}
+                  on:change={() => handleAvailabilityChange(item.id, 'available')}
+                  disabled={item.isAvailabilityFrozen || item.needToPurchaseLocally}
                 >
                 {#if item.isAvailable}
                   <span class="ml-2 text-green-500">✓</span>
                 {/if}
               </td>
+              <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                <input 
+                  type="checkbox" 
+                  bind:checked={item.needToPurchaseLocally} 
+                  on:change={() => handleAvailabilityChange(item.id, 'need_to_purchase')}
+                  disabled={item.isAvailabilityFrozen || item.isAvailable}
+                >
+                {#if item.needToPurchaseLocally}
+                  <span class="ml-2 text-blue-500">✓</span>
+                {/if}
+              </td>
             </tr>
+            {#if item.isAvailable || item.needToPurchaseLocally}
+              <tr>
+                <td colspan="7" class="px-6 py-4">
+                  <div class="flex space-x-4">
+                    <div class="flex-1">
+                      <label for="serial-no-{item.id}" class="block text-sm font-medium text-gray-700">Serial No.: *</label>
+                      <input 
+                        type="text" 
+                        id="serial-no-{item.id}" 
+                        bind:value={item.serialNo} 
+                        class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"
+                        required
+                      >
+                    </div>
+                    <div class="flex-1">
+                      <label for="invoice-no-{item.id}" class="block text-sm font-medium text-gray-700">Invoice No.: *</label>
+                      <input 
+                        type="text" 
+                        id="invoice-no-{item.id}" 
+                        bind:value={item.invoiceNo} 
+                        class="mt-1 block w-full border-gray-300 rounded-md shadow-sm"
+                        required
+                      >
+                    </div>
+                    <div class="flex-1">
+                      <label for="attachment-{item.id}" class="block text-sm font-medium text-gray-700">Attachment:</label>
+                      <input 
+                        type="file" 
+                        id="attachment-{item.id}" 
+                        on:change={(e) => handleAttachmentChange(e, item.id)}
+                        class="mt-1 block w-full"
+                        accept="application/pdf,image/*"
+                      >
+                      {#if item.attachment}
+                        <div class="mt-2">
+                          <span class="text-sm text-gray-600">{item.attachment.name}</span>
+                          <button 
+                            type="button" 
+                            on:click={() => openPreviewModalMaterial(item)}
+                            class="text-blue-600 hover:text-blue-800 ml-2"
+                          >
+                            Preview
+                          </button>
+                        </div>
+                      {/if}
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            {/if}
           {/each}
         </tbody>
       </table>
@@ -1402,6 +1847,21 @@ function updateDeliveryDateMin(index: number) {
     </button>
   </div>
 {/if}
+
+{#if allItemsSaved}
+  <div class="text-center mt-4 text-lg font-bold text-green-600">
+    All items have been saved. You can now submit the stage.
+  </div>
+{/if}
+
+<!-- Preview Modal -->
+<div id="previewModal" class="modal" style="display:none; position:fixed; z-index:1; left:0; top:0; width:100%; height:100%; overflow:auto; background-color:rgba(0,0,0,0.4);">
+  <div class="modal-content" style="background-color:#fefefe; margin:15% auto; padding:20px; border:1px solid #888; width:80%;">
+    <span class="close" on:click={closePreviewModal} style="color:#aaa; float:right; font-size:28px; font-weight:bold; cursor:pointer;">&times;</span>
+    <img id="previewImage" alt="File preview" style="max-width:100%; max-height:70vh; display:none;">
+    <iframe id="previewIframe" style="width:100%; height:70vh; display:none;"></iframe>
+  </div>
+</div>
  
   {:else if currentStage === 3}
    <!-- On Going stage content -->
@@ -1450,7 +1910,6 @@ function updateDeliveryDateMin(index: number) {
             </button>
           </div>
 
-
         {#if shipment.activeTab === 'installation'}
           <!-- Installation fields -->
           <div class="space-y-4">
@@ -1486,7 +1945,6 @@ function updateDeliveryDateMin(index: number) {
                   required
                   disabled={shipment.isSaved}
                 >
-
               </div>
               <div>
                 <label for="vendor-name-{index}" class="block text-sm font-medium text-gray-700">Vendor name:</label>
@@ -1499,7 +1957,9 @@ function updateDeliveryDateMin(index: number) {
             </div>
             <div>
               <label for="installation-report-{index}" class="block text-sm font-medium text-gray-700">Installation report attachment:</label>
-              <input type="file" id="installation-report-{index}" on:change={(e) => handleStage3FileChange(e, 'installation', index)} accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" class="mt-1 block w-full" required disabled={shipment.isSaved}>
+              {#if !shipment.isSaved}
+              <input type="file" id="installation-report-{index}" on:change={(e) => handleStage3FileChange(e, 'installation', index)} accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" class="mt-1 block w-full" required>
+            {/if}
               {#if Stage3Data.Report}
                 <div class="mt-2">
                   <button 
@@ -1511,7 +1971,7 @@ function updateDeliveryDateMin(index: number) {
                   </button>
                   <button 
                     type="button" 
-                    on:click={() => downloadFile(shipment.installationFile)}
+                    on:click={() => downloadFile(shipment.installationFile, shipment.installationFileName)}
                     class="text-green-600 hover:text-green-800"
                   >
                     Download
@@ -1568,9 +2028,12 @@ function updateDeliveryDateMin(index: number) {
             <div class="grid grid-cols-2 gap-4">
               <div>
                 <label for="service-report-{index}" class="block text-sm font-medium text-gray-700">Service report attachment:</label>
-                <input type="file" id="service-report-{index}" on:change={(e) => handleStage3FileChange(e, 'service', index)} accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" class="mt-1 block w-full" required disabled={shipment.isSaved}>
+                {#if !shipment.isSaved}
+                <input type="file" id="service-report-{index}" on:change={(e) => handleStage3FileChange(e, 'service', index)} accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" class="mt-1 block w-full" required>
+                {/if}
                 {#if Stage3Data.Report}
                   <div class="mt-2">
+                    <span class="text-sm text-gray-600">{shipment.serviceFileName || 'File uploaded'}</span>
                     <button 
                       type="button" 
                       on:click={() => previewFile(Stage3Data.Report)}
@@ -1580,7 +2043,7 @@ function updateDeliveryDateMin(index: number) {
                     </button>
                     <button 
                       type="button" 
-                      on:click={() => downloadFile(Stage3Data.Report)}
+                      on:click={() => downloadFile(Stage3Data.Report, shipment.serviceFileName)}
                       class="text-green-600 hover:text-green-800"
                     >
                       Download
@@ -1627,7 +2090,6 @@ function updateDeliveryDateMin(index: number) {
         >
           {returnPickupRequested ? 'Cancel Return Pickup' : 'Request Return Pickup'}
         </button>
-
        <!-- Return Pickup Details box -->
        {#if returnPickupRequested && !showReturnPickupConfirmation}
        <div class="mb-8 p-4 border rounded-lg relative">
@@ -1711,12 +2173,11 @@ function updateDeliveryDateMin(index: number) {
    
    {:else if currentStage === 4 && stageData[4].visible}
    <!-- Return Pickup Stage -->
-{#each returnPickups as pickup, index}
-<div class="mb-8 p-4 border rounded-lg relative">
-  {#if pickup.rejected}
-    <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4" role="alert">
-      <strong class="font-bold">Rejected:</strong>
-      <span class="block sm:inline"> {pickup.rejectionRemark}</span>
+   <div class="mb-8 p-4 border rounded-lg relative">
+    {#if returnPickup.rejected}
+      <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4" role="alert">
+        <strong class="font-bold">Rejected:</strong>
+        <span class="block sm:inline"> {returnPickup.rejectionRemark}</span>
     </div>
   {/if}
   <h4 class="text-lg font-bold mb-4">Return Pickup Report</h4>
@@ -1724,41 +2185,41 @@ function updateDeliveryDateMin(index: number) {
   <div class="space-y-4">
     <div class="flex space-x-4">
       <div class="flex-1">
-        <label for="return-pickup-name-{index}" class="block text-sm font-medium text-gray-700">Name:</label>
-        <input 
-          type="text" 
-          id="return-pickup-name-{index}" 
-          value={Stage4Data.ReturnPickupName} readonly
-          class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" 
-          required
-          disabled={pickup.isSaved}
+        <label for="return-pickup-name" class="block text-sm font-medium text-gray-700">Name:</label>
+            <input 
+              type="text" 
+              id="return-pickup-name" 
+              bind:value={returnPickup.name} 
+              class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" 
+              required
+              disabled={returnPickup.isSaved}
         >
       </div>
       <div class="flex-1">
-        <label for="return-pickup-mobile-{index}" class="block text-sm font-medium text-gray-700">Mobile Number:</label>
+        <label for="return-pickup-mobile" class="block text-sm font-medium text-gray-700">Mobile Number:</label>
         <input 
           type="tel" 
-          id="return-pickup-mobile-{index}" 
-          value={Stage4Data.ReturnPickupMobile} readonly 
-          on:input={(e) => handleReturnPickupMobileInput(e)}
+          id="return-pickup-mobile" 
+              bind:value={returnPickup.mobile} 
+              on:input={handleReturnPickupMobileInput}
           class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" 
           pattern="[0-9]{10}"
           maxlength="10"
           required
-          disabled={pickup.isSaved}
+          disabled={returnPickup.isSaved}
         >
       </div>
     </div>
 
     <div>
-      <label for="return-pickup-remark-{index}" class="block text-sm font-medium text-gray-700">Project Manager's Remark:</label>
-      <textarea 
-        id="return-pickup-remark-{index}" 
-        value={Stage4Data.ReturnPickupRemark} readonly
+      <label for="return-pickup-remark" class="block text-sm font-medium text-gray-700">Project Manager's Remark:</label>
+          <textarea 
+            id="return-pickup-remark" 
+            bind:value={returnPickup.remark} 
         class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" 
         rows="3" 
         required
-        disabled={pickup.isSaved}
+        disabled={returnPickup.isSaved}
       ></textarea>
     </div>
   </div>
@@ -1766,102 +2227,104 @@ function updateDeliveryDateMin(index: number) {
   <!-- Additional fields -->
   <div class="flex space-x-4 mt-4">
     <div class="flex-1">
-      <label for="dc-number-{index}" class="block text-sm font-medium text-gray-700">DC Number:</label>
+      <label for="dc-number" class="block text-sm font-medium text-gray-700">DC Number:</label>
       <input 
         type="text" 
-        id="dc-number-{index}" 
-        bind:value={Stage4Data.DCNumber}
+        id="dc-number" 
+        bind:value={returnPickup.dcNumber} 
         class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" 
         required
-        disabled={pickup.isSaved}
+        disabled={returnPickup.isSaved}
       >
     </div>
     <div class="flex-1">
-      <label for="tracking-no-{index}" class="block text-sm font-medium text-gray-700">Courier's tracking no.:</label>
+      <label for="tracking-no" class="block text-sm font-medium text-gray-700">Courier's tracking no.:</label>
       <input 
         type="text" 
-        id="tracking-no-{index}" 
-        bind:value={Stage4Data.CourierTrackNo} 
+        id="tracking-no" 
+        bind:value={returnPickup.trackingNo} 
         class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" 
         required
-        disabled={pickup.isSaved}
+        disabled={returnPickup.isSaved}
       >
     </div>
     <div class="flex-1">
-      <label for="dc-amount-{index}" class="block text-sm font-medium text-gray-700">DC Amount:</label>
+      <label for="dc-amount" class="block text-sm font-medium text-gray-700">DC Amount:</label>
       <input 
         type="text" 
-        id="dc-amount-{index}" 
-        bind:value={Stage4Data.DCAmount} 
-        on:input={(e) => formatAmountreturn(e, index)}
+        id="dc-amount" 
+        bind:value={returnPickup.dcAmount} 
+        on:input={formatAmountreturn}
         class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" 
         required
-        disabled={pickup.isSaved}
+        disabled={returnPickup.isSaved}
       >
     </div>
   </div>
   <div class="flex space-x-4 mt-4">
     <div class="flex-1">
-      <label for="dispatched-date-{index}" class="block text-sm font-medium text-gray-700">Dispatched date:</label>
+      <label for="dispatched-date" class="block text-sm font-medium text-gray-700">Dispatched date:</label>
       <input 
         type="date" 
-        id="dispatched-date-{index}" 
-        bind:value={Stage4Data.DispatchDate} 
-        on:change={() => updateDeliveryDateMin(index)}
+        id="dispatched-date" 
+            bind:value={returnPickup.dispatchedDate} 
+            on:change={updateDeliveryDateMin}
         max={getCurrentDate()}
         class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" 
         required
-        disabled={pickup.isSaved}
+        disabled={returnPickup.isSaved}
       >
     </div>
     <div class="flex-1">
-      <label for="delivery-date-{index}" class="block text-sm font-medium text-gray-700">Delivery date:</label>
+      <label for="delivery-date" class="block text-sm font-medium text-gray-700">Delivery date:</label>
       <input 
         type="date" 
-        id="delivery-date-{index}" 
-       bind:value={Stage4Data.DeliveryDate} 
-        min={pickup.dispatchedDate}
+        id="delivery-date" 
+        bind:value={returnPickup.deliveryDate} 
+        min={returnPickup.dispatchedDate}
         class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" 
         required
-        disabled={pickup.isSaved}
+        disabled={returnPickup.isSaved}
       >
     </div>
   </div>
   <div class="mt-4">
-    <label for="return-pickup-remark-{index}" class="block text-sm font-medium text-gray-700">Remark:</label>
+    <label for="return-pickup-remark" class="block text-sm font-medium text-gray-700">Remark:</label>
     <textarea 
-      id="return-pickup-remark-{index}" 
-      bind:value={Stage4Data.Remark} 
+    id="return-pickup-remark" 
+    bind:value={returnPickup.dcaccountRemark} 
       class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" 
       rows="3" 
       required
-      disabled={pickup.isSaved}
+      disabled={returnPickup.isSaved}
     ></textarea>
   </div>
   <div class="mt-4">
-    <label for="attachment-{index}" class="block text-sm font-medium text-gray-700">Attachment:</label>
+    <label for="attachment" class="block text-sm font-medium text-gray-700">Attachment:</label>
+    {#if !returnPickup.isSaved}
     <input 
-      type="file" 
-      id="attachment-{index}" 
-      on:change={(e) => handleReturnPickupFileChange(e, index)}
+    type="file" 
+    id="attachment" 
+    on:change={handleReturnPickupFileChange}
       class="mt-1 block w-full" 
       accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
       required
-      disabled={pickup.isSaved}
     >
-    {#if pickup.file}
-      <div class="mt-2">
+    {/if}
+        {#if returnPickup.file}
+          <div class="mt-2">
+            <span class="text-sm text-gray-600">{returnPickup.fileName || 'File uploaded'}</span>
         <button 
           type="button" 
-          on:click={() => previewFile(Stage4Data.Attachment)}
-          class="text-blue-600 hover:text-blue-800 mr-2"
+          on:click={() => previewFile(returnPickup.file)}
+              class="text-blue-600 hover:text-blue-800 ml-2"
         >
           Preview
         </button>
         <button 
           type="button" 
-          on:click={() => downloadFile(Stage4Data.Attachment)}
-          class="text-green-600 hover:text-green-800"
+          on:click={() => downloadFile(returnPickup.file, returnPickup.fileName || '')}
+    class="text-green-600 hover:text-green-800 ml-2"
         >
           Download
         </button>
@@ -1869,17 +2332,17 @@ function updateDeliveryDateMin(index: number) {
     {/if}
   </div>
 
-  {#if !pickup.isSaved}
+  {#if !returnPickup.isSaved}
     <button 
       type="button" 
-      on:click={() => saveReturnPickup}
+      on:click={saveReturnPickup}
       class="mt-4 px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600 absolute bottom-2 right-2"
     >
       Save
     </button>
   {/if}
 </div>
-{/each}
+
 
 <!-- File Preview Modal -->
 <div id="filePreviewModal" class="modal" style="display: none;">
@@ -1888,7 +2351,6 @@ function updateDeliveryDateMin(index: number) {
   <iframe id="filePreviewFrame" style="width: 100%; height: 500px;"></iframe>
 </div>
 </div>
-
 
 
   {:else if currentStage === (stageData[4].visible ? 5 : 4)}
@@ -1904,10 +2366,12 @@ function updateDeliveryDateMin(index: number) {
       </div>
       <div>
         <label for="installation-report-{index}" class="block text-sm font-medium text-gray-700">Installation report attachment:</label>
-        <input type="file" id="installation-report-{index}" on:change={(e) => handleStage3FileChange(e, 'installation', index)} accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" class="mt-1 block w-full" required disabled={shipment.isDataSaved}>
-        
-        {#if shipment.installationFile}
-          <div class="mt-2">
+        {#if !shipment.isDataSaved}
+            <input type="file" id="installation-report-{index}" on:change={(e) => handleStage3FileChange(e, 'installation', index)} accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" class="mt-1 block w-full" required>
+          {/if}
+          {#if shipment.installationFile}
+            <div class="mt-2">
+              <span class="text-sm text-gray-600">{shipment.installationFileName || 'File uploaded'}</span>
             <button 
               type="button" 
               on:click={() => previewFile(shipment.installationFile)}
@@ -1917,8 +2381,8 @@ function updateDeliveryDateMin(index: number) {
             </button>
             <button 
               type="button" 
-              on:click={() => downloadFile(shipment.installationFile)}
-              class="text-green-600 hover:text-green-800"
+              on:click={() => downloadFile(shipment.installationFile, shipment.installationFileName)}
+                class="text-green-600 hover:text-green-800 ml-2"
             >
               Download
             </button>
@@ -2007,44 +2471,46 @@ function updateDeliveryDateMin(index: number) {
   <h4 class="text-lg font-bold mb-2">Return Pickups Report</h4>
 
   <!-- Return Pickups -->
-  {#each returnPickups.filter(p => p.isSaved) as pickup, index}
+  {#if returnPickup.isSaved}
     <div class="mb-6 p-4 border rounded-lg relative">
        <!-- New fields -->
        <div class="mt-4">
-        <label for="return-pickup-remark-{index}" class="block text-sm font-medium text-gray-700">Return pickup report remarks:</label>
+        <label for="return-pickup-remark" class="block text-sm font-medium text-gray-700">Return pickup report remarks:</label>
         <textarea 
-          id="return-pickup-remark-{index}" 
-          bind:value={pickup.dcaccountRemark} 
+        id="return-pickup-remark" 
+        bind:value={returnPickup.dcaccountRemark}
           class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" 
           rows="3" 
           required
-          disabled={pickup.isSaved}
+          disabled={returnPickup.isSaved}
         ></textarea>
       </div>
       <div class="mt-4">
-        <label for="attachment-{index}" class="block text-sm font-medium text-gray-700">Return pickup report attachment:</label>
+        <label for="attachment" class="block text-sm font-medium text-gray-700">Return pickup report attachment:</label>
+        {#if !returnPickup.isDataSaved}
         <input 
           type="file" 
-          id="attachment-{index}" 
-          on:change={(e) => handleReturnPickupFileChange(e, index)}
+          id="attachment" 
+            on:change={handleReturnPickupFileChange}
           class="mt-1 block w-full" 
           accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
           required
-          disabled={pickup.isSaved}
         >
-        {#if pickup.file}
+        {/if}
+        {#if returnPickup.file}
           <div class="mt-2">
+            <span class="text-sm text-gray-600">{returnPickup.fileName || 'File uploaded'}</span>
             <button 
               type="button" 
-              on:click={() => previewFile(pickup.file)}
-              class="text-blue-600 hover:text-blue-800 mr-2"
+              on:click={() => previewFile(returnPickup.file)}
+              class="text-blue-600 hover:text-blue-800 ml-2"
             >
               Preview
             </button>
             <button 
               type="button" 
-              on:click={() => downloadFile(pickup.file)}
-              class="text-green-600 hover:text-green-800"
+              on:click={() => downloadFile(returnPickup.file, returnPickup.fileName || '')}
+              class="text-green-600 hover:text-green-800 ml-2"
             >
               Download
             </button>
@@ -2052,44 +2518,43 @@ function updateDeliveryDateMin(index: number) {
         {/if}
       </div>
     
-      {#if !pickup.isSaved}
+      {#if !returnPickup.isSaved}
         <button 
           type="button" 
-          on:click={() => saveReturnPickup(index)}
+          on:click={saveReturnPickup}
           class="mt-4 px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600 absolute bottom-2 right-2"
         >
           Save
         </button>
-      {/if}
-   
+      {/if}   
       
       <!-- Approval/Rejection toggle buttons -->
       <div class="flex justify-center space-x-4 mb-4">
         <button
           type="button"
-          class="px-3 py-1 {pickup.accountStatus === 'approved' ? 'bg-green-500 text-white' : 'bg-gray-200'} rounded"
+          class="px-3 py-1 {returnPickup.accountStatus === 'approved' ? 'bg-green-500 text-white' : 'bg-gray-200'} rounded"
           on:click={() => {
-            if (pickup.accountStatus === 'rejected') {
-              pickup.rejected = false;
-              pickup.rejectionRemark = '';
+            if (returnPickup.accountStatus === 'rejected') {
+              returnPickup.rejected = false;
+              returnPickup.rejectionRemark = '';
             }
-            pickup.accountStatus = 'approved';
-            pickup.accountRemark = '';
+            returnPickup.accountStatus = 'approved';
+            returnPickup.accountRemark = '';
           }}
-          disabled={pickup.isDataSaved}
+          disabled={returnPickup.isDataSaved}
         >
           Approved
         </button>
         <button
           type="button"
-          class="px-3 py-1 {pickup.accountStatus === 'rejected' ? 'bg-red-500 text-white' : 'bg-gray-200'} rounded"
+          class="px-3 py-1 {returnPickup.accountStatus === 'rejected' ? 'bg-red-500 text-white' : 'bg-gray-200'} rounded"
           on:click={() => {
-            pickup.accountStatus = 'rejected';
-            pickup.accountRemark = '';
-            pickup.rejected = true;
-            pickup.rejectionRemark = '';
+            returnPickup.accountStatus = 'rejected';
+            returnPickup.accountRemark = '';
+            returnPickup.rejected = true;
+            returnPickup.rejectionRemark = '';
           }}
-          disabled={pickup.isDataSaved}
+          disabled={returnPickup.isDataSaved}
         >
           Rejected
         </button>
@@ -2097,48 +2562,48 @@ function updateDeliveryDateMin(index: number) {
 
       <!-- Remark field -->
       <div class="mb-2">
-        <label for="pickup-remark-{index}" class="block text-sm font-medium text-gray-700">Remark:</label>
+        <label for="pickup-remark" class="block text-sm font-medium text-gray-700">Remark:</label>
         <textarea 
-          id="pickup-remark-{index}" 
-          bind:value={pickup.accountRemark} 
+          id="pickup-remark" 
+          bind:value={returnPickup.accountRemark} 
           on:input={() => {
-            if (pickup.accountStatus === 'rejected') {
-              pickup.rejectionRemark = pickup.accountRemark;
+            if (returnPickup.accountStatus === 'rejected') {
+              returnPickup.rejectionRemark = returnPickup.accountRemark;
             }
           }}
           class="mt-1 block w-full border-gray-300 rounded-md shadow-sm" 
           rows="3" 
           required
-          disabled={pickup.isDataSaved}
-        ></textarea>
+          disabled={returnPickup.isDataSaved}
+        ></textarea>        
       </div>
 
       <!-- Save/Edit button -->
       <button 
         type="button" 
         on:click={() => {
-          if (pickup.isDataSaved) {
+          if (returnPickup.isDataSaved) {
             // Enter edit mode
-            pickup.isDataSaved = false;
-            pickup.isEditing = true;
+            returnPickup.isDataSaved = false;
+            returnPickup.isEditing = true;
           } else {
             // Validate before saving
-            if (!pickup.accountStatus || !pickup.accountRemark || pickup.accountRemark.trim() === '') {
+            if (!returnPickup.accountStatus || !returnPickup.accountRemark || returnPickup.accountRemark.trim() === '') {
               alert("Please fill up the details before saving");
               return;
             }
             // Save changes
-            pickup.isDataSaved = true;
-            pickup.isEditing = false;
+            returnPickup.isDataSaved = true;
+            returnPickup.isEditing = false;
             // Add any additional save logic here
           }
         }}
-        class="absolute down-2 right-2 px-2 py-1 {pickup.isDataSaved ? 'bg-blue-500' : 'bg-green-500'} text-white rounded text-sm"
-      >
-        {pickup.isDataSaved ? 'Edit' : 'Save'}
+        class="absolute down-2 right-2 px-2 py-1 {returnPickup.isDataSaved ? 'bg-blue-500' : 'bg-green-500'} text-white rounded text-sm"
+        >
+          {returnPickup.isDataSaved ? 'Edit' : 'Save'}
       </button>
     </div>
-  {/each}
+  {/if}
 {/if}
  
 
@@ -2165,8 +2630,12 @@ function updateDeliveryDateMin(index: number) {
         </div>
       {/if}
 
-        <!-- Submit and navigation buttons -->
-        <div class="flex justify-between items-center mt-8">
+        <!-- Submit and Edit buttons -->
+        <div class="flex justify-end mt-4 space-x-2">
+          <button type="submit" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">
+            Submit
+          </button>
+           <!-- Previous Stage button -->
           <button 
             type="button" 
             on:click={goToPreviousStage}
@@ -2175,50 +2644,35 @@ function updateDeliveryDateMin(index: number) {
             Previous Stage
           </button>
 
-          <div class="space-x-4">
-            {#if stageData[currentStage].completed}
               <button 
-                type="button" 
-                on:click={editStage} 
-                class="px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg transition-colors duration-200"
+              type="button" 
+              on:click={goToNextStage} 
+              class="px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg transition-colors duration-200"
               >
+              Next Stage
+          </button>
+          {#if stageData[currentStage].completed}
+            <button type="button" on:click={editStage} class="bg-yellow-500 hover:bg-yellow-700 text-white font-bold py-2 px-4 rounded">
                 Edit
               </button>
-            {/if}
-            <button 
-              type="submit" 
-              class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors duration-200"
-            >
-              Submit
-            </button>
+            {/if}            
           </div>
 
-          <button 
-            type="button" 
-            on:click={goToNextStage}
-            class="px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-lg transition-colors duration-200"
-          >
-            Next Stage
-          </button>
-        </div>
-      </form>
+    <!-- Time information -->
+    <div class="mt-8 text-sm text-gray-500">
+      {#if stageStartTimes[currentStage]}
+        <p class="absolute bottom-2 left-2">Started on: {stageStartTimes[currentStage]}</p>
+      {/if}
+      {#if lastSavedTimes[currentStage] && !lastSubmittedTimes[currentStage]}
+        <p class="absolute bottom-2 right-2">Last saved on: {lastSavedTimes[currentStage]}</p>
+      {:else if lastSubmittedTimes[currentStage]}
+        <p class="absolute bottom-2 right-2">Last submitted on: {lastSubmittedTimes[currentStage]}</p>
+      {/if}
     </div>
 
-
-    <!-- Time information -->
-    <footer class="bg-gray-100 p-4 text-sm text-gray-600">
-      <div class="flex justify-between">
-        {#if stageStartTimes[currentStage]}
-          <p>Started on: {stageStartTimes[currentStage]}</p>
-        {/if}
-        {#if lastSavedTimes[currentStage] && !lastSubmittedTimes[currentStage]}
-          <p>Last saved on: {lastSavedTimes[currentStage]}</p>
-        {:else if lastSubmittedTimes[currentStage]}
-          <p>Last submitted on: {lastSubmittedTimes[currentStage]}</p>
-        {/if}
-      </div>
-    </footer>
+  </form>
   </div>
+</div>
 </div>
 
 <style>

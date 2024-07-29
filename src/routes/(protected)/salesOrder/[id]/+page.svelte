@@ -2,6 +2,7 @@
  import { page } from '$app/stores';
     import { goto } from '$app/navigation';
     import type { PageData } from './$types';
+    import type { SalesOrder } from '$lib/types';
     import '$lib/styles/app.css';
     import { onMount } from 'svelte';
     import { fade } from 'svelte/transition';
@@ -9,19 +10,39 @@
     import { writable } from 'svelte/store';
     import { ArrowLeft, Download, ChevronDown } from 'svelte-lucide';
     import { logStore, type LogEntry } from '../../../../lib/stores/LogStore';
-
+    import { fly } from 'svelte/transition';
+    import { Clock, User, Activity } from 'svelte-lucide';
 
     export let data: PageData;
+    let expandedLog: string | null = null;
+ 
+   function toggleLogExpansion(logId: string) {
+     expandedLog = expandedLog === logId ? null : logId;
+   }
+ 
+   function getActionIcon(action: string) {
+     if (action.toLowerCase().includes('updated')) return 'pencil';
+     if (action.toLowerCase().includes('created')) return 'plus-circle';
+     if (action.toLowerCase().includes('deleted')) return 'trash-2';
+     return 'activity';
+   }
 
     let currentUsername = data.user.name;
     let currentUserRole = data.user.role;
     
     $: salesOrder = data.salesOrder;
+    $: activityLogs = data.activityLogs as ActivityLog[];
+    $: currentStage = data.currentStage;
 
     $: console.log(data);
 
     let showStageUpdateModal = false;
     let showDocumentsDropdown = false;
+    let isExpanded = false;
+ 
+     function toggleExpand() {
+     isExpanded = !isExpanded;
+     }
 
     function toggleStageUpdateModal() {
         showStageUpdateModal = !showStageUpdateModal;
@@ -78,10 +99,8 @@
         activeTab = tab;
     }
 
-  let soCategory = "";
-  let projectManagerName = "";
-
   let salesOrderLogs: LogEntry[] = [];
+  let Stage0Data: any;
 
   onMount(() => {
     logStore.loadLogs();
@@ -105,9 +124,23 @@
     unsubscribe();
   }
 
-  function formatLogDate(date: Date): string {
-    return new Date(date).toLocaleString();
-  }
+  function formatLogDate(dateString: Date) {
+   return new Date(dateString).toLocaleString('en-GB', {
+     year: 'numeric',
+     month: 'short',
+     day: 'numeric',
+     hour: '2-digit',
+     minute: '2-digit'
+   });
+ }
+ 
+   function getActionColor(action: string): string {
+     if (action.toLowerCase().includes('updated')) return 'bg-blue-500';
+     if (action.toLowerCase().includes('created')) return 'bg-green-500';
+     if (action.toLowerCase().includes('deleted')) return 'bg-red-500';
+     return 'bg-gray-500';
+   }
+ 
 </script>
 
 <div class="bg-gray-100 min-h-screen py-8 px-4">
@@ -130,10 +163,29 @@
                         {salesOrder.status}
                     </span>
                     <button 
-                        class="bg-white text-blue-600 hover:bg-blue-50 font-bold py-2 px-4 rounded transition duration-300 ease-in-out"
+                        class="bg-white text-[#3c53e7] hover:bg-gray-100 font-semibold py-2.5 px-5 rounded-md shadow-sm hover:shadow transition duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-white focus:ring-opacity-50"
                         on:click={toggleStageUpdateModal}
                     >
-                        Update Status
+                    <span class="flex items-center">
+                        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        {#if currentStage && currentStage.currentStage === 0}
+                            Site Not Ready
+                        {:else if currentStage && currentStage.currentStage === 1}
+                            Logistic
+                        {:else if currentStage && currentStage.currentStage === 2}
+                            Material to Procure
+                        {:else if currentStage && currentStage.currentStage === 3}
+                            Ongoing
+                        {:else if currentStage && currentStage.currentStage === 4}
+                            Return Pickup
+                        {:else if currentStage && currentStage.currentStage === 5}
+                            Share With Account
+                        {:else}
+                            Update Status
+                        {/if}
+                    </span>
                     </button>
                 </div>
             </div>
@@ -240,35 +292,47 @@
     </div>
 </div>
 
-<div class="max-w-6xl mx-auto mt-8">
-  <div class="bg-white shadow-xl rounded-lg overflow-hidden">
-    <div class="bg-gradient-to-r from-blue-600 to-indigo-600 px-6 py-4">
-      <h2 class="text-xl font-bold text-white">Activity Logs for SO #{salesOrder.salesorder_number}</h2>
+<!-- Activity Logs -->
+<div class="bg-white p-6 rounded-lg shadow-lg mt-8">
+    <h2 class="text-xl font-semibold text-gray-800 mb-6">Activity Logs</h2>
+    
+    {#if activityLogs && activityLogs.length > 0}
+      <div class="relative">
+        <!-- Timeline line -->
+        <div class="absolute left-4 top-0 bottom-0 w-0.5 bg-gray-200"></div>
+  
+        <!-- Log entries -->
+        {#each activityLogs as log}
+          <div class="mb-8 flex">
+            <!-- Timeline dot -->
+            <div class="absolute left-4 w-3 h-3 rounded-full mt-1.5 -ml-1.5 {getActionColor(log.action)}"></div>
+            
+            <!-- Log content -->
+            <div class="ml-12">
+              <div class="flex items-center mb-1">
+                <span class="font-medium text-gray-900 mr-2">{log.username}</span>
+                <span class="text-sm text-gray-500">({log.role})</span>
     </div>
-    <div class="p-6">
-      {#if salesOrderLogs.length === 0}
-        <p class="text-gray-500">No activity logs yet for this Sales Order.</p>
-      {:else}
-        <ul class="space-y-4">
-          {#each salesOrderLogs as log}
-            <li class="border-b border-gray-200 pb-2">
-              <p class="text-sm text-gray-600">{formatLogDate(log.timestamp)}</p>
-              <p class="font-medium">{log.username} ({log.role})</p>
-              <p>{log.action}</p>
-            </li>
-          {/each}
-        </ul>
-      {/if}
+    <p class="text-gray-700 mb-2">{log.action}</p>
+             <span class="text-sm text-gray-500">{formatLogDate(log.timestamp)}</span>
     </div>
   </div>
+  {/each}
 </div>
+{:else}
+<p class="text-gray-500 italic">No activity logs available.</p>
+{/if}
+</div>
+   
 
 {#if showStageUpdateModal}
-    <StageUpdateModal 
-        {salesOrder} 
-        {data}
-        username={currentUsername}
-        userRole={currentUserRole}
-        on:close={toggleStageUpdateModal}
-    />
+<!-- svelte-ignore missing-declaration -->
+<StageUpdateModal
+    {Stage0Data} 
+    {salesOrder} 
+    {data}
+    username={currentUsername}
+    userRole={currentUserRole}
+    on:close={toggleStageUpdateModal}
+/>
 {/if}
